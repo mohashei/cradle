@@ -99,6 +99,7 @@ function captureConsole(...methods) {
   }
 }
 captureConsole('warn', 'error');
+addEventListener('securitypolicyviolation', (e) => logSync(`blocked by page policy: ${e.blockedURI} (${e.violatedDirective})`));
 const fail = (err, where = '') => { console.error(where, err?.code, err); toast(`Sync problem: ${err?.code || err?.message || err}`); };
 
 // ---------- Formatting ----------
@@ -1445,6 +1446,14 @@ async function syncSheet() {
   setLogLevel('debug');
   logSync(`--- sync details opened · Firestore 13.0.0 · pending ${JSON.stringify(S.pending)}`);
   try { await auth.currentUser.getIdToken(true); logSync('sign-in token refresh: ok'); } catch (err) { logSync(`sign-in token refresh failed: ${err?.code || err?.message}`); }
+  // Can this phone reach each server at all? Any reply, even an error status, means yes.
+  for (const host of ['securetoken.googleapis.com', 'identitytoolkit.googleapis.com', 'firestore.googleapis.com', 'www.gstatic.com']) {
+    const started = Date.now();
+    try {
+      await fetch(`https://${host}/`, { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(15000) });
+      logSync(`reach ${host}: ok (${Date.now() - started} ms)`);
+    } catch (err) { logSync(`reach ${host}: FAILED after ${Date.now() - started} ms: ${err?.name} ${err?.message}`); }
+  }
   try { await disableNetwork(db); await enableNetwork(db); logSync('reconnected'); } catch (err) { logSync(`reconnect failed: ${err?.code || err?.message}`); }
 }
 
