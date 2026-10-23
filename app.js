@@ -15,7 +15,7 @@ import {
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, collection, query, where,
   onSnapshot, setDoc, deleteDoc, getDoc, getDocs, writeBatch, updateDoc, deleteField, terminate,
-  clearIndexedDbPersistence, connectFirestoreEmulator,
+  clearIndexedDbPersistence, connectFirestoreEmulator, setLogLevel, disableNetwork, enableNetwork,
 } from 'https://www.gstatic.com/firebasejs/13.0.0/firebase-firestore.js';
 
 const ITER = 600000;                      // PBKDF2-SHA256 iterations (OWASP 2023 guidance)
@@ -77,6 +77,28 @@ function toast(msg) {
   el.textContent = msg; el.classList.add('on');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('on'), 3200);
 }
+// Recent sync messages, kept in memory so Settings -> Sync details can show them on the phone.
+const syncLog = [];
+function logSync(msg) {
+  const line = `${new Date().toTimeString().slice(0, 8)} ${msg}`
+    .replace(/eyJ[\w-]+\.[\w-]+\.[\w-]*/g, '[token]')   // never show sign-in tokens
+    .replace(/[\w+/=-]{48,}/g, '…');                    // long encrypted blobs add nothing
+  syncLog.push(line.slice(0, 600));
+  if (syncLog.length > 400) syncLog.splice(0, syncLog.length - 400);
+}
+// Firebase logs straight to the console, so keep a copy of what's printed there.
+const captured = new Set();
+function captureConsole(...methods) {
+  const text = (a) => (typeof a === 'string' ? a : a instanceof Error ? `${a.name} ${a.code || ''} ${a.message}`
+    : (() => { try { return JSON.stringify(a); } catch { return String(a); } })());
+  for (const m of methods) {
+    if (captured.has(m)) continue;
+    captured.add(m);
+    const orig = console[m].bind(console);
+    console[m] = (...args) => { orig(...args); logSync(`${m} ${args.map(text).join(' ')}`); };
+  }
+}
+captureConsole('warn', 'error');
 const fail = (err, where = '') => { console.error(where, err?.code, err); toast(`Sync problem: ${err?.code || err?.message || err}`); };
 
 // ---------- Formatting ----------
@@ -1396,7 +1418,34 @@ function settingsSheet() {
     h('button', { type: 'button', class: 'btn secondary', onclick: passwordSheet }, 'Change my password'),
     baby() ? h('button', { type: 'button', class: 'btn secondary', onclick: exportData }, `Export a backup of ${baby().name}`) : null,
     baby() ? h('button', { type: 'button', class: 'btn secondary', onclick: importData }, `Restore a backup into ${baby().name}`) : null,
+    h('button', { type: 'button', class: 'btn secondary', onclick: syncSheet }, 'Sync details'),
     h('button', { type: 'button', class: 'btn danger', onclick: signOutDevice }, 'Log out on this phone')));
+}
+// For when entries don't reach the other phones. Opening it turns on Firestore's detailed log for
+// this session and reconnects, so the log shows the next attempt to send what's waiting.
+async function syncSheet() {
+  const status = h('p', { class: 'mute small' });
+  const out = h('pre', { class: 'code log' });
+  const show = () => {
+    const waiting = Object.entries(S.pending).filter(([, v]) => v).map(([k]) => k);
+    status.textContent = `${navigator.onLine ? 'Online' : 'Offline'} · logged in as ${S.me} · `
+      + (waiting.length ? `waiting to send: ${waiting.join(', ')}` : 'nothing waiting to send');
+    out.textContent = syncLog.join('\n') || 'Nothing logged yet.';
+  };
+  const copy = h('button', { type: 'button', class: 'btn secondary', onclick: () => {
+    navigator.clipboard.writeText(`${status.textContent}\n${syncLog.join('\n')}`)
+      .then(() => toast('Copied'), () => toast("Couldn't copy; select the text instead"));
+  } }, 'Copy');
+  openSheet('Sync details', h('div', { class: 'stack' }, status,
+    h('p', { class: 'mute small' }, 'Leave this open for about 20 seconds, then tap Copy and send it to whoever looks after Cradle. Encrypted data and sign-in tokens are left out.'),
+    copy, out));
+  show();
+  const timer = setInterval(() => (out.isConnected ? show() : clearInterval(timer)), 1000);
+  captureConsole('log', 'info', 'debug');
+  setLogLevel('debug');
+  logSync(`--- sync details opened · Firestore 13.0.0 · pending ${JSON.stringify(S.pending)}`);
+  try { await auth.currentUser.getIdToken(true); logSync('sign-in token refresh: ok'); } catch (err) { logSync(`sign-in token refresh failed: ${err?.code || err?.message}`); }
+  try { await disableNetwork(db); await enableNetwork(db); logSync('reconnected'); } catch (err) { logSync(`reconnect failed: ${err?.code || err?.message}`); }
 }
 
 function passwordSheet() {
